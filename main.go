@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/coreos/go-systemd/dbus"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var debugOn bool
@@ -18,6 +20,38 @@ var tlsOn bool
 
 var clientCertFilePath string
 var clientKeyFilePath string
+
+var totalRequestsCount = prometheus.NewCounter(prometheus.CounterOpts(prometheus.Opts{
+	Namespace: "healtcheck",
+	Subsystem: "requests",
+	Name:      "total",
+	Help:      "total requests",
+
+	ConstLabels: map[string]string{
+		"type": "tcp",
+	},
+}))
+
+var totalSuccessChecksCount = prometheus.NewCounter(prometheus.CounterOpts(prometheus.Opts{
+	Namespace: "healtcheck",
+	Subsystem: "success",
+	Name:      "total",
+	Help:      "count of success requests",
+
+	ConstLabels: map[string]string{
+		"type": "tcp",
+	},
+}))
+var totalFailedChecksCount = prometheus.NewCounter(prometheus.CounterOpts(prometheus.Opts{
+	Namespace: "healtcheck",
+	Subsystem: "failed",
+	Name:      "total",
+	Help:      "count of success requests",
+
+	ConstLabels: map[string]string{
+		"type": "tcp",
+	},
+}))
 
 type Checker interface {
 	Check() bool
@@ -37,6 +71,8 @@ type serviceProperties struct {
 }
 
 func (c SystemdChecker) Check() bool {
+
+	totalRequestsCount.Inc()
 
 	if c.UnitName != "" {
 		systemdConn, err := dbus.NewSystemdConnection()
@@ -137,10 +173,12 @@ func makeHandler(checkers []Checker) func(w http.ResponseWriter, r *http.Request
 	return func(w http.ResponseWriter, r *http.Request) {
 		for _, check := range checkers {
 			if check.Check() == false {
+				totalFailedChecksCount.Inc()
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 		}
+		totalSuccessChecksCount.Inc()
 		w.Write([]byte("Service alive"))
 	}
 }
@@ -153,7 +191,7 @@ func main() {
 	tlsPtr := flag.Bool("tls", false, "enable tls mode")
 	tlscertPrt := flag.String("cert", "server.crt", "path to server certificate")
 	tlskeyPrt := flag.String("key", "server.key", "path to server private key")
-	locationPrt := flag.String("l", "/healthz", "healthcheck service location")
+	locationPrt := flag.String("l", "/healthz", "healthcheck service location (dont use /metrics)")
 	portPtr := flag.String("p", "8989", "healthcheck service port")
 	ipPtr := flag.String("ip", "", "healthcheck service IP address")
 	flag.Parse()
@@ -182,7 +220,12 @@ func main() {
 		},
 	}
 
+	prometheus.MustRegister(totalRequestsCount)
+	prometheus.MustRegister(totalSuccessChecksCount)
+	prometheus.MustRegister(totalFailedChecksCount)
+
 	log.Print("Try to start service on ", *ipPtr, ":", *portPtr, *locationPrt)
 	http.HandleFunc(*locationPrt, makeHandler(serviceChecks))
+	http.Handle("/metrics", promhttp.Handler())
 	http.ListenAndServe(listendAddress, nil)
 }
